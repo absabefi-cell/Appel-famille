@@ -1,1 +1,426 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Appel Famille</title>
+  <style>
+    body{font-family:system-ui,Arial;margin:0;background:#0b141a;color:#e9edef}
+    .wrap{max-width:980px;margin:0 auto;padding:16px;display:grid;gap:12px}
+    .card{background:#111b21;border:1px solid #1f2c33;border-radius:14px;padding:12px}
+    .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+    input,select,button{padding:10px 12px;border-radius:12px;border:1px solid #26353d;background:#0b141a;color:#e9edef}
+    button{cursor:pointer}
+    button.primary{background:#00a884;border-color:#00a884;color:#061a14;font-weight:700}
+    button.danger{background:#c0392b;border-color:#c0392b}
+    .videos{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    video{width:100%;background:#000;border-radius:14px;aspect-ratio:16/9}
+    #status{opacity:.9}
+    .chat{display:grid;gap:8px}
+    .msgs{height:260px;overflow:auto;background:#0b141a;border:1px solid #26353d;border-radius:14px;padding:10px}
+    .msg{margin:6px 0}
+    .me{color:#00d2ff}
+    .them{color:#ffbe0b}
+    .small{font-size:12px;opacity:.8}
+    .pill{display:inline-block;padding:6px 10px;border-radius:999px;border:1px solid #26353d}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <div style="font-size:18px;font-weight:800">Appel Famille</div>
+          <div class="small">Samsung ↔ iPhone · Vidéo + Chat · Sonnerie (si page ouverte)</div>
+        </div>
+        <div class="pill" id="roleBadge">Rôle: —</div>
+      </div>
+      <div style="height:10px"></div>
+      <div class="row">
+        <label class="small">Room</label>
+        <input id="roomId" placeholder="ex: adam / sara / yanis" />
+        <label class="small">Moi</label>
+        <select id="me">
+          <option value="pere">Père</option>
+          <option value="enfant">Enfant</option>
+        </select>
+        <button id="btnInit" class="primary">Activer caméra + micro</button>
+        <button id="btnCall">Appeler</button>
+        <button id="btnAnswer">Répondre</button>
+        <button id="btnHangup" class="danger">Raccrocher</button>
+      </div>
+      <div style="height:8px"></div>
+      <div id="status">Statut: prêt.</div>
+      <div class="small">Astuce: mets un room fixe par enfant. Exemple: <b>?room=adam</b></div>
+    </div>
 
+    <div class="card videos">
+      <div>
+        <div class="small">Moi</div>
+        <video id="localVideo" autoplay playsinline muted></video>
+      </div>
+      <div>
+        <div class="small">L’autre</div>
+        <video id="remoteVideo" autoplay playsinline></video>
+      </div>
+    </div>
+
+    <div class="card chat">
+      <div class="row" style="justify-content:space-between">
+        <div style="font-weight:800">Chat</div>
+        <div class="small">Messages temps réel (Firestore)</div>
+      </div>
+      <div class="msgs" id="msgs"></div>
+      <div class="row">
+        <input id="chatInput" placeholder="Écris un message…" style="flex:1;min-width:220px" />
+        <button id="btnSend" class="primary">Envoyer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Sonnerie (simple bip). iPhone/Android: nécessite une action utilisateur avant de pouvoir jouer du son. -->
+  <audio id="ringtone" preload="auto">
+    <source src="data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=" type="audio/wav">
+  </audio>
+
+  <script type="module">
+    // Firebase (module, sans npm)
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-app.js";
+    import {
+      getFirestore, doc, setDoc, getDoc, onSnapshot, updateDoc,
+      collection, addDoc, query, orderBy, serverTimestamp, limit
+    } from "https://www.gstatic.com/firebasejs/12.7.0/firebase-firestore.js";
+
+    // ✅ TA CONFIG
+    const firebaseConfig = {
+      apiKey: "AIzaSyDkbjgG9x-JD3qTkNYFzXVcYKVODUFiXl0",
+      authDomain: "appel-famille.firebaseapp.com",
+      projectId: "appel-famille",
+      storageBucket: "appel-famille.firebasestorage.app",
+      messagingSenderId: "818226902530",
+      appId: "1:818226902530:web:f7188d93869be9db6ed91b"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+
+    // UI
+    const roomIdEl = document.getElementById("roomId");
+    const meEl = document.getElementById("me");
+    const statusEl = document.getElementById("status");
+    const roleBadge = document.getElementById("roleBadge");
+
+    const btnInit = document.getElementById("btnInit");
+    const btnCall = document.getElementById("btnCall");
+    const btnAnswer = document.getElementById("btnAnswer");
+    const btnHangup = document.getElementById("btnHangup");
+
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
+
+    const msgsEl = document.getElementById("msgs");
+    const chatInput = document.getElementById("chatInput");
+    const btnSend = document.getElementById("btnSend");
+
+    const ringtone = document.getElementById("ringtone");
+
+    // Parse room from URL (?room=adam)
+    const url = new URL(location.href);
+    const roomFromUrl = url.searchParams.get("room");
+    if (roomFromUrl) roomIdEl.value = roomFromUrl;
+
+    function setStatus(s){ statusEl.textContent = "Statut: " + s; }
+    function setRoleBadge(){ roleBadge.textContent = "Rôle: " + (meEl.value === "pere" ? "Père" : "Enfant"); }
+    meEl.addEventListener("change", setRoleBadge);
+    setRoleBadge();
+
+    // WebRTC
+    const rtcConfig = {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" }
+      ]
+    };
+
+    let pc = null;
+    let localStream = null;
+    let remoteStream = null;
+
+    let unsubCall = null;
+    let unsubChat = null;
+
+    function roomRefs(roomId){
+      const callRef = doc(db, "rooms", roomId, "calls", "current");
+      const msgCol = collection(db, "rooms", roomId, "messages");
+      return { callRef, msgCol };
+    }
+
+    function ensureRoom(){
+      const roomId = roomIdEl.value.trim();
+      if (!roomId) throw new Error("Mets un roomId (ex: adam)");
+      return roomId;
+    }
+
+    async function initMedia(){
+      // iOS/Android demandent une action utilisateur pour micro/cam + audio
+      const roomId = ensureRoom();
+
+      setRoleBadge();
+      setStatus("activation caméra/micro…");
+
+      localStream = await navigator.mediaDevices.getUserMedia({ video:true, audio:true });
+      localVideo.srcObject = localStream;
+
+      remoteStream = new MediaStream();
+      remoteVideo.srcObject = remoteStream;
+
+      pc = new RTCPeerConnection(rtcConfig);
+
+      // tracks local -> peer
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+
+      // tracks remote -> UI
+      pc.ontrack = (e) => {
+        e.streams[0].getTracks().forEach(t => remoteStream.addTrack(t));
+      };
+
+      pc.onicecandidate = async (e) => {
+        if (!e.candidate) return;
+        const { callRef } = roomRefs(roomId);
+        const who = meEl.value; // "pere" ou "enfant"
+        const field = who === "pere" ? "iceFromPere" : "iceFromEnfant";
+        await updateDoc(callRef, { [field]: window.firebaseArrayUnion(e.candidate.toJSON()) })
+          .catch(()=>{}); // si doc pas encore créé
+      };
+
+      // Préparer doc call si absent
+      const { callRef } = roomRefs(roomId);
+      const snap = await getDoc(callRef);
+      if (!snap.exists()){
+        await setDoc(callRef, {
+          state: "idle",
+          offer: null,
+          answer: null,
+          iceFromPere: [],
+          iceFromEnfant: [],
+          updatedAt: serverTimestamp()
+        });
+      }
+
+      attachListeners(roomId);
+      setStatus("prêt. (page ouverte = peut sonner)");
+      // “prime” audio permission (sinon la sonnerie peut être bloquée)
+      try { await ringtone.play(); ringtone.pause(); ringtone.currentTime = 0; } catch {}
+    }
+
+    // Firestore arrayUnion helper (sans compat)
+    // petit hack: on construit une "arrayUnion" via updateDoc avec FieldValue
+    // mais on évite l'import extra : on stocke ICE en append côté client via lecture + set
+    // => on remplace donc onicecandidate par un append sûr ci-dessous.
+    // (on redéfinit onicecandidate après initMedia)
+    function patchIceAppend(roomId){
+      pc.onicecandidate = async (e) => {
+        if (!e.candidate) return;
+        const { callRef } = roomRefs(roomId);
+        const snap = await getDoc(callRef);
+        const data = snap.data() || {};
+        const who = meEl.value;
+        const key = who === "pere" ? "iceFromPere" : "iceFromEnfant";
+        const list = Array.isArray(data[key]) ? data[key] : [];
+        list.push(e.candidate.toJSON());
+        await updateDoc(callRef, { [key]: list, updatedAt: serverTimestamp() });
+      };
+    }
+
+    function stopRinging(){
+      try { ringtone.pause(); ringtone.currentTime = 0; } catch {}
+    }
+    async function startRinging(){
+      try {
+        ringtone.loop = true;
+        await ringtone.play();
+      } catch {
+        // si bloqué, l'utilisateur doit appuyer sur un bouton (Init/Answer)
+      }
+    }
+
+    function attachListeners(roomId){
+      // Call doc realtime
+      const { callRef, msgCol } = roomRefs(roomId);
+
+      if (unsubCall) unsubCall();
+      unsubCall = onSnapshot(callRef, async (snap) => {
+        const d = snap.data();
+        if (!d) return;
+
+        // Sonnerie côté enfant: si offer arrive et pas encore répondu
+        if (meEl.value === "enfant" && d.offer && !d.answer && d.state !== "in-call") {
+          setStatus("appel entrant…");
+          await startRinging();
+        }
+
+        // Si answer arrive et on est père -> appliquer
+        if (meEl.value === "pere" && d.answer && pc && pc.signalingState === "have-local-offer") {
+          await pc.setRemoteDescription(new RTCSessionDescription(d.answer));
+          setStatus("connecté.");
+        }
+
+        // ICE: appliquer l’autre côté
+        if (!pc) return;
+
+        const theirIce = meEl.value === "pere" ? (d.iceFromEnfant||[]) : (d.iceFromPere||[]);
+        // Appliquer seulement les nouveaux (on garde un set)
+        applyIce(theirIce);
+
+        // Hangup remote
+        if (d.state === "ended") {
+          stopRinging();
+          setStatus("appel terminé.");
+        }
+      });
+
+      // Chat realtime
+      if (unsubChat) unsubChat();
+      const q = query(msgCol, orderBy("ts","desc"), limit(50));
+      unsubChat = onSnapshot(q, (qs) => {
+        const items = [];
+        qs.forEach(docu => items.push({ id: docu.id, ...docu.data() }));
+        items.reverse();
+        msgsEl.innerHTML = items.map(m => {
+          const cls = m.from === meEl.value ? "me" : "them";
+          const when = m.ts?.toDate ? m.ts.toDate().toLocaleTimeString() : "";
+          return `<div class="msg ${cls}"><b>${m.from}</b>: ${escapeHtml(m.text||"")} <span class="small">${when}</span></div>`;
+        }).join("");
+        msgsEl.scrollTop = msgsEl.scrollHeight;
+      });
+    }
+
+    const appliedIce = new Set();
+    async function applyIce(list){
+      for (const c of list){
+        const key = JSON.stringify(c);
+        if (appliedIce.has(key)) continue;
+        appliedIce.add(key);
+        try { await pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+      }
+    }
+
+    function escapeHtml(s){
+      return (s+"").replace(/[&<>"']/g, m => ({
+        "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"
+      }[m]));
+    }
+
+    // Actions
+    btnInit.addEventListener("click", async () => {
+      try {
+        await initMedia();
+        patchIceAppend(ensureRoom());
+      } catch (e) {
+        setStatus("erreur: " + e.message);
+      }
+    });
+
+    btnCall.addEventListener("click", async () => {
+      try {
+        const roomId = ensureRoom();
+        if (!pc || !localStream) throw new Error("Clique d’abord sur Activer caméra + micro");
+
+        stopRinging();
+        setStatus("appel en cours…");
+
+        const { callRef } = roomRefs(roomId);
+
+        // Reset call doc
+        await setDoc(callRef, {
+          state: "calling",
+          offer: null,
+          answer: null,
+          iceFromPere: [],
+          iceFromEnfant: [],
+          updatedAt: serverTimestamp()
+        });
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        await updateDoc(callRef, {
+          offer: { type: offer.type, sdp: offer.sdp },
+          updatedAt: serverTimestamp()
+        });
+
+      } catch (e) {
+        setStatus("erreur: " + e.message);
+      }
+    });
+
+    btnAnswer.addEventListener("click", async () => {
+      try {
+        const roomId = ensureRoom();
+        if (!pc || !localStream) throw new Error("Clique d’abord sur Activer caméra + micro");
+
+        const { callRef } = roomRefs(roomId);
+        const snap = await getDoc(callRef);
+        const d = snap.data();
+        if (!d?.offer) throw new Error("Pas d’appel entrant sur ce room.");
+
+        stopRinging();
+        setStatus("connexion…");
+
+        await pc.setRemoteDescription(new RTCSessionDescription(d.offer));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        await updateDoc(callRef, {
+          answer: { type: answer.type, sdp: answer.sdp },
+          state: "in-call",
+          updatedAt: serverTimestamp()
+        });
+
+      } catch (e) {
+        setStatus("erreur: " + e.message);
+      }
+    });
+
+    btnHangup.addEventListener("click", async () => {
+      try {
+        const roomId = ensureRoom();
+        stopRinging();
+
+        if (pc) { pc.close(); pc = null; }
+        if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
+        if (remoteStream) { remoteStream.getTracks().forEach(t => t.stop()); remoteStream = null; }
+
+        localVideo.srcObject = null;
+        remoteVideo.srcObject = null;
+
+        const { callRef } = roomRefs(roomId);
+        await updateDoc(callRef, { state: "ended", updatedAt: serverTimestamp() }).catch(()=>{});
+
+        setStatus("raccroché.");
+      } catch (e) {
+        setStatus("erreur: " + e.message);
+      }
+    });
+
+    btnSend.addEventListener("click", async () => {
+      try {
+        const roomId = ensureRoom();
+        const text = chatInput.value.trim();
+        if (!text) return;
+
+        const { msgCol } = roomRefs(roomId);
+        await addDoc(msgCol, { from: meEl.value, text, ts: serverTimestamp() });
+        chatInput.value = "";
+      } catch (e) {
+        setStatus("erreur chat: " + e.message);
+      }
+    });
+
+    // Auto attach listeners if room provided
+    if (roomIdEl.value.trim()) {
+      try { attachListeners(roomIdEl.value.trim()); } catch {}
+    }
+  </script>
+</body>
+</html>
